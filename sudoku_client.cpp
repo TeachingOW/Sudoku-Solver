@@ -29,35 +29,27 @@ public:
         close(sock);
     }
 
-    template<typename T>
-    NetStream& operator<<(const T& data) {
+    // Send row, col, val, optional color
+    void sendCell(int row, int col, int val, const std::string& color="") {
         std::ostringstream oss;
-        oss << data;
+        oss << row << " " << col << " " << val;
+        if(!color.empty()) oss << " " << color;
+        oss << "\n";
         std::string s = oss.str();
         ::send(sock, s.c_str(), s.size(), 0);
-        ::send(sock, " ", 1, 0);
-        return *this;
-    }
-
-    void endmsg() {
-        ::send(sock, "\n", 1, 0);
     }
 };
 
 int main() {
     NetStream server("127.0.0.1", 12345);
 
-    // Example: fill cell row 0, col 0 with 7
-    server << 0 << 0 << 7;
-    server.endmsg();
-
-    // Example: fill cell row 4, col 5 with 9
-    server << 4 << 4 << 9;
-    server.endmsg();
-
-    server << 3 << 3 << 8;
-    server.endmsg();
-
-    
+    // Example: fill some cells with custom colors
+    server.sendCell(0, 0, 7, "#ff0000"); // red
+    server.sendCell(1, 1, 5, "#00ff00"); // green
+    server.sendCell(6, 6, 9, "#0000ff"); // blue
+    server.sendCell(3, 3, 8);            // default color
+    server.sendCell(3, 4, 8);            // default color
+    server.sendCell(3, 5, 8);            // default color
+    server.sendCell(0, 5, 8);            // default color
     return 0;
 }

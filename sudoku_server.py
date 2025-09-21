@@ -1,76 +1,77 @@
-import socket
-import threading
-import tkinter as tk
+import asyncio
+import json
+import websockets
 
-class SudokuServer:
-    def __init__(self, host="0.0.0.0", port=12345):
-        self.host = host
-        self.port = port
-        self.root = tk.Tk()
-        self.root.title("Sudoku Grid (Shared)")
-        self.entries = [[None for _ in range(9)] for _ in range(9)]
-        self.build_grid()
-        self.start_server()
+TCP_PORT = 12345
+WS_PORT = 6789
 
-    def build_grid(self):
-        """Create an empty editable Sudoku grid"""
-        for r in range(9):
-            for c in range(9):
-                e = tk.Entry(self.root, width=2, font=("Arial", 20), justify="center")
-                e.grid(row=r, column=c, padx=3, pady=3)
-                self.entries[r][c] = e
-
-    def update_cell(self, row, col, value):
-        """Update a single cell in the grid"""
-        if 0 <= row < 9 and 0 <= col < 9:
-            self.entries[row][col].delete(0, tk.END)
-            if value != 0:
-                self.entries[row][col].insert(0, str(value))
-
-    def handle_client(self, conn, addr):
-        """Handle one client in a separate thread"""
-        print(f"Client connected: {addr}")
-        buffer = ""
-        with conn:
-            while True:
-                try:
-                    data = conn.recv(1024).decode("utf-8")
-                except ConnectionResetError:
-                    break
-                if not data:
-                    break
-                buffer += data
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    parts = line.strip().split()
-                    if len(parts) == 3:
-                        try:
-                            row, col, val = map(int, parts)
-                            print(f"[{addr}] row={row}, col={col}, val={val}")
-                            self.root.after(0, self.update_cell, row, col, val)
-                        except ValueError:
-                            print(f"[{addr}] Invalid integers:", parts)
-                    else:
-                        print(f"[{addr}] Ignored malformed:", line)
-        print(f"Client disconnected: {addr}")
-
-    def start_server(self):
-        """Run server socket accepting many clients"""
-        def run():
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
-                server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                server.bind((self.host, self.port))
-                server.listen()
-                print(f"Server listening on {self.host}:{self.port}")
-                while True:
-                    conn, addr = server.accept()
-                    threading.Thread(target=self.handle_client, args=(conn, addr), daemon=True).start()
-
-        threading.Thread(target=run, daemon=True).start()
-
-    def run(self):
-        self.root.mainloop()
+board = [[0]*9 for _ in range(9)]
+ws_clients = set()
+board_lock = asyncio.Lock()
 
 
-if __name__ == "__main__":
-    SudokuServer().run()
+async def broadcast(msg):
+    if ws_clients:
+        await asyncio.gather(*(ws.send(json.dumps(msg)) for ws in ws_clients))
+
+
+# TCP handler
+async def handle_tcp(reader, writer):
+    addr = writer.get_extra_info("peername")
+    source_id = f"tcp:{addr[0]}:{addr[1]}"
+    print(f"[TCP] {addr} connected")
+    buffer = ""
+    try:
+        while not reader.at_eof():
+            data = await reader.read(1024)
+            if not data:
+                break
+            buffer += data.decode()
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                parts = line.strip().split()
+                if len(parts) != 3: continue
+                try: r, c, v = map(int, parts)
+                except ValueError: continue
+                async with board_lock:
+                    board[r][c] = v
+                await broadcast({"type": "update", "row": r, "col": c, "val": v, "source": source_id})
+    except:
+        pass
+    writer.close()
+    await writer.wait_closed()
+    print(f"[TCP] {addr} disconnected")
+
+
+async def ws_handler(ws):
+    ws_clients.add(ws)
+    addr = ws.remote_address
+    source_id = f"ws:{addr[0]}:{addr[1]}"
+    async with board_lock:
+        await ws.send(json.dumps({"type": "snapshot", "board": board}))
+    try:
+        async for msg in ws:
+            try:
+                data = json.loads(msg)
+                if data["type"] == "update":
+                    r, c, v = int(data["row"]), int(data["col"]), int(data["val"])
+                    color = data.get("color", None)
+                    async with board_lock:
+                        board[r][c] = v
+                    await broadcast({"type":"update","row":r,"col":c,"val":v,"source":source_id,"color":color})
+            except:
+                continue
+    finally:
+        ws_clients.remove(ws)
+
+
+
+
+async def main():
+    tcp_server = await asyncio.start_server(handle_tcp, "0.0.0.0", TCP_PORT)
+    ws_server = websockets.serve(ws_handler, "0.0.0.0", WS_PORT)
+    print(f"TCP server on port {TCP_PORT}, WebSocket on {WS_PORT}")
+    async with tcp_server:
+        await asyncio.gather(tcp_server.serve_forever(), ws_server)
+
+asyncio.run(main())
