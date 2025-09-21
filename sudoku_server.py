@@ -1,76 +1,49 @@
 import asyncio
-import json
 import websockets
 
 TCP_PORT = 12345
 WS_PORT = 6789
 
-board = [[0]*9 for _ in range(9)]
+# Store the single websocket reader client
 ws_clients = set()
-board_lock = asyncio.Lock()
 
-
-async def broadcast(msg):
-    if ws_clients:
-        await asyncio.gather(*(ws.send(json.dumps(msg)) for ws in ws_clients))
-
-
-# TCP handler
 async def handle_tcp(reader, writer):
+    """Handle TCP writer client"""
     addr = writer.get_extra_info("peername")
-    source_id = f"tcp:{addr[0]}:{addr[1]}"
-    print(f"[TCP] {addr} connected")
-    buffer = ""
+    print(f"[TCP] Writer connected from {addr}")
     try:
         while not reader.at_eof():
-            data = await reader.read(1024)
+            data = await reader.readline()
             if not data:
                 break
-            buffer += data.decode()
-            while "\n" in buffer:
-                line, buffer = buffer.split("\n", 1)
-                parts = line.strip().split()
-                if len(parts) != 3: continue
-                try: r, c, v = map(int, parts)
-                except ValueError: continue
-                async with board_lock:
-                    board[r][c] = v
-                await broadcast({"type": "update", "row": r, "col": c, "val": v, "source": source_id})
-    except:
-        pass
-    writer.close()
-    await writer.wait_closed()
-    print(f"[TCP] {addr} disconnected")
+            msg = data.decode().strip()
+            print(f"[TCP] Got: {msg}")
+            # forward to websocket client(s)
+            if ws_clients:
+                await asyncio.gather(*(ws.send(msg) for ws in ws_clients))
+    except Exception as e:
+        print(f"[TCP] Exception: {e}")
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        print(f"[TCP] Writer disconnected")
 
-
-async def ws_handler(ws):
+async def handle_websocket(ws):
+    """Handle WebSocket reader client"""
     ws_clients.add(ws)
-    addr = ws.remote_address
-    source_id = f"ws:{addr[0]}:{addr[1]}"
-    async with board_lock:
-        await ws.send(json.dumps({"type": "snapshot", "board": board}))
+    print("[WS] Reader connected")
     try:
-        async for msg in ws:
-            try:
-                data = json.loads(msg)
-                if data["type"] == "update":
-                    r, c, v = int(data["row"]), int(data["col"]), int(data["val"])
-                    color = data.get("color", None)
-                    async with board_lock:
-                        board[r][c] = v
-                    await broadcast({"type":"update","row":r,"col":c,"val":v,"source":source_id,"color":color})
-            except:
-                continue
+        async for _ in ws:  # reader does not send anything
+            pass
     finally:
         ws_clients.remove(ws)
-
-
-
+        print("[WS] Reader disconnected")
 
 async def main():
     tcp_server = await asyncio.start_server(handle_tcp, "0.0.0.0", TCP_PORT)
-    ws_server = websockets.serve(ws_handler, "0.0.0.0", WS_PORT)
-    print(f"TCP server on port {TCP_PORT}, WebSocket on {WS_PORT}")
+    ws_server = websockets.serve(handle_websocket, "0.0.0.0", WS_PORT)
+
+    print(f"Server running: TCP on {TCP_PORT}, WebSocket on {WS_PORT}")
     async with tcp_server:
         await asyncio.gather(tcp_server.serve_forever(), ws_server)
 
